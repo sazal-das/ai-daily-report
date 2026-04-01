@@ -1,0 +1,181 @@
+name: PR Format Check
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+jobs:
+  pr_format_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v2
+      - name: Run PR format check
+        run: |
+          #!/bin/bash
+          # Collect PR info
+          echo "repository info $GITHUB_REPOSITORY"
+          PR_NUMBER=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH")
+          echo "PR number is $PR_NUMBER"
+          # Fetch PR data with error handling
+          echo "Fetching PR data from GitHub API..."
+          PR_DATA=$(curl -sSL "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" -H "Authorization: Bearer ${{ secrets.GH_ACTIONS_SECRET }}")
+
+          # Check if API call was successful
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to fetch PR data from GitHub API"
+            exit 1
+          fi
+
+          # Check if the response contains an error message
+          if echo "$PR_DATA" | jq -e '.message' > /dev/null 2>&1; then
+            echo "Error: GitHub API returned an error: $(echo "$PR_DATA" | jq -r '.message')"
+            exit 1
+          fi
+
+          # Extract title and description
+          PR_TITLE=$(echo "$PR_DATA" | jq --raw-output .title)
+          PR_DESCRIPTION=$(echo "$PR_DATA" | jq --raw-output .body)
+
+          # Check if title and description were extracted successfully
+          if [ "$PR_TITLE" = "null" ] || [ -z "$PR_TITLE" ]; then
+            echo "Error: Failed to extract PR title from API response"
+            exit 1
+          fi
+
+          if [ "$PR_DESCRIPTION" = "null" ]; then
+            echo "Warning: PR description is empty or null"
+            PR_DESCRIPTION=""
+          fi
+
+          echo "PR title is $PR_TITLE"
+          echo "PR description is $PR_DESCRIPTION"
+
+          # Regular expressions 
+          TITLE_REGEX="^Issue #[0-9]+( #[0-9]+)* - .+$"
+          DESCRIPTION_REGEX="^Issue #[0-9]+( #[0-9]+)* ?$"
+
+          # Check PR title
+          if ! [[ $PR_TITLE =~ $TITLE_REGEX ]]; then
+            echo "Error: PR title does not meet the required format."
+            exit 1
+          fi
+
+          # Check PR description
+          if ! [[ $PR_DESCRIPTION =~ $DESCRIPTION_REGEX ]]; then
+            echo "Error: PR description does not meet the required format."
+            exit 1
+          fi
+
+          # Extract issue numbers from the title and description
+          TITLE_ISSUES=($(echo "$PR_TITLE" | grep -oE '#[0-9]+' | tr -d '#'))
+          DESCRIPTION_ISSUES=($(echo "$PR_DESCRIPTION" | grep -oE '#[0-9]+' | tr -d '#'))
+
+          echo "Extracted issues from title: ${TITLE_ISSUES[@]}"
+          echo "Extracted issues from description: ${DESCRIPTION_ISSUES[@]}"
+
+          # Check if the arrays match
+          for issue in "${TITLE_ISSUES[@]}"; do
+            if [[ ! " ${DESCRIPTION_ISSUES[@]} " =~ " $issue " ]]; then
+              echo "Error: Issue #$issue in the title does not match any issue in the description."
+              exit 1
+            fi
+          done
+
+          for issue in "${DESCRIPTION_ISSUES[@]}"; do
+            if [[ ! " ${TITLE_ISSUES[@]} " =~ " $issue " ]]; then
+              echo "Error: Issue #$issue in the description does not match any issue in the title."
+              exit 1
+            fi
+          done
+
+          echo "All issue numbers in the title and description match."
+
+  issue_format_check:
+    needs: pr_format_check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v2
+      - name: Run Issue format check
+        run: |
+          #!/bin/bash
+          echo "Repository: $GITHUB_REPOSITORY"
+          PR_NUMBER=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH")
+          echo "PR number: $PR_NUMBER"
+
+          # Fetch PR data to extract issue references
+          PR_DATA=$(curl -sSL "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            -H "Authorization: Bearer ${{ secrets.GH_ACTIONS_SECRET }}")
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to fetch PR data from GitHub API"
+            exit 1
+          fi
+
+          if echo "$PR_DATA" | jq -e '.message' > /dev/null 2>&1; then
+            echo "Error: GitHub API returned an error: $(echo "$PR_DATA" | jq -r '.message')"
+            exit 1
+          fi
+
+          PR_TITLE=$(echo "$PR_DATA" | jq --raw-output .title)
+
+          if [ "$PR_TITLE" = "null" ] || [ -z "$PR_TITLE" ]; then
+            echo "Error: Failed to extract PR title from API response"
+            exit 1
+          fi
+
+          echo "PR title: $PR_TITLE"
+
+          # Extract issue numbers referenced in the PR title
+          ISSUE_NUMBERS=($(echo "$PR_TITLE" | grep -oE '#[0-9]+' | tr -d '#'))
+
+          if [ ${#ISSUE_NUMBERS[@]} -eq 0 ]; then
+            echo "Error: No issue numbers found in PR title"
+            exit 1
+          fi
+
+          echo "Referenced issues: ${ISSUE_NUMBERS[@]}"
+
+          TITLE_REGEX="^\[[A-Z]+\] .+$|^[A-Za-z ]+: .+$"
+
+          for ISSUE_NUMBER in "${ISSUE_NUMBERS[@]}"; do
+            echo "---"
+            echo "Checking Issue #$ISSUE_NUMBER..."
+
+            ISSUE_DATA=$(curl -sSL "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" \
+              -H "Authorization: Bearer ${{ secrets.GH_ACTIONS_SECRET }}")
+
+            if [ $? -ne 0 ]; then
+              echo "Error: Failed to fetch Issue #$ISSUE_NUMBER from GitHub API"
+              exit 1
+            fi
+
+            if echo "$ISSUE_DATA" | jq -e '.message' > /dev/null 2>&1; then
+              echo "Error: Issue #$ISSUE_NUMBER does not exist or is inaccessible: $(echo "$ISSUE_DATA" | jq -r '.message')"
+              exit 1
+            fi
+
+            ISSUE_TITLE=$(echo "$ISSUE_DATA" | jq --raw-output .title)
+            ISSUE_BODY=$(echo "$ISSUE_DATA" | jq --raw-output .body)
+
+            echo "Issue #$ISSUE_NUMBER title: $ISSUE_TITLE"
+
+            # Validate issue title format
+            if ! [[ "$ISSUE_TITLE" =~ $TITLE_REGEX ]]; then
+              echo "Error: Issue #$ISSUE_NUMBER title does not meet the required format."
+              echo "Expected: '[UPPERCASE_TAG] Description' or 'Word: Description'"
+              exit 1
+            fi
+
+            # Validate issue body is not empty
+            if [ "$ISSUE_BODY" = "null" ] || [ -z "$ISSUE_BODY" ]; then
+              echo "Error: Issue #$ISSUE_NUMBER has no description"
+              exit 1
+            fi
+
+            echo "Issue #$ISSUE_NUMBER passed all checks."
+          done
+
+          echo "---"
+          echo "All referenced issues are valid."
